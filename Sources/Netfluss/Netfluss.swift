@@ -45,6 +45,7 @@ struct NetFlussApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appState: AppState?
     private var preferencesObserver: NSObjectProtocol?
+    private var settingsWindowObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppIconController.shared.start()
@@ -59,6 +60,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Linked against a recent SDK, SwiftUI opens the placeholder Settings
+        // scene at launch — an empty "NetFluss Settings" window. The real
+        // preferences live in PreferencesWindowController, so close it whenever
+        // it shows up.
+        closeEmptySettingsWindows()
+        DispatchQueue.main.async { [weak self] in self?.closeEmptySettingsWindows() }
+        settingsWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.closeEmptySettingsWindows()
+            }
+        }
+    }
+
+    private static let swiftUISettingsWindowID = "com_apple_SwiftUI_Settings_window"
+
+    private func closeEmptySettingsWindows() {
+        for window in NSApp.windows where window.isVisible
+            && (window.identifier?.rawValue == Self.swiftUISettingsWindowID
+                || window.frameAutosaveName == Self.swiftUISettingsWindowID) {
+            window.close()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -66,6 +92,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TrafficTimer.shared.persist()
         if let preferencesObserver {
             NotificationCenter.default.removeObserver(preferencesObserver)
+        }
+        if let settingsWindowObserver {
+            NotificationCenter.default.removeObserver(settingsWindowObserver)
         }
     }
 }

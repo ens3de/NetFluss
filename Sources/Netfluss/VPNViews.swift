@@ -21,18 +21,11 @@ import UniformTypeIdentifiers
 
 // MARK: - Popover section
 
-/// Compact VPN control in the popover: pick a profile + server and connect.
+/// VPN control in the popover: every profile is its own row with a connect
+/// button, so switching tunnels never goes through a dropdown.
 struct VPNSectionView: View {
     let useBits: Bool
     @EnvironmentObject private var vpn: VPNManager
-    @EnvironmentObject private var monitor: NetworkMonitor
-    @State private var selectedProfileID: UUID?
-
-    private var currentProfile: VPNProfile? {
-        if let id = selectedProfileID, let p = vpn.profiles.first(where: { $0.id == id }) { return p }
-        if let activeID = vpn.status.profileID, let p = vpn.profiles.first(where: { $0.id == activeID }) { return p }
-        return vpn.profiles.first
-    }
 
     private func isActive(_ profile: VPNProfile) -> Bool {
         vpn.status.profileID == profile.id && vpn.status.state.isActive
@@ -52,22 +45,47 @@ struct VPNSectionView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
-            } else if let profile = currentProfile {
-                content(for: profile)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(vpn.profiles) { profile in
+                        row(for: profile)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+                .onAppear { vpn.setUsageVisible(true) }
+                .onDisappear { vpn.setUsageVisible(false) }
             }
         }
     }
 
     @ViewBuilder
-    private func content(for profile: VPNProfile) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if vpn.profiles.count > 1 {
-                Picker(selection: Binding(get: { profile.id }, set: { selectedProfileID = $0 })) {
-                    ForEach(vpn.profiles) { Text($0.name).tag($0.id) }
-                } label: { EmptyView() }
-                .labelsHidden()
+    private func row(for profile: VPNProfile) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                statusDot(profile)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text(profile.name)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        if vpn.onDemandProfileIDs.contains(profile.id) {
+                            onDemandBadge
+                        }
+                    }
+                    Text(statusText(profile))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button(L10n.text(isActive(profile) ? "Disconnect" : "Connect")) {
+                    // Only one tunnel runs at a time: connecting another one
+                    // disconnects the current tunnel first.
+                    if isActive(profile) { vpn.disconnect() } else { vpn.switchTo(profile) }
+                }
+                .controlSize(.small)
+                .disabled(vpn.status.state.isBusy)
             }
 
             if profile.servers.count > 1 {
@@ -77,46 +95,55 @@ struct VPNSectionView: View {
                     }
                 } label: { EmptyView() }
                 .labelsHidden()
-                .disabled(isActive(profile))
-            }
-
-            HStack(spacing: 8) {
-                statusDot(profile)
-                Text(statusText(profile))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
-                Button(L10n.text(isActive(profile) ? "Disconnect" : "Connect")) {
-                    if isActive(profile) { vpn.disconnect() } else { vpn.connect(profile) }
-                }
                 .controlSize(.small)
-                .disabled(vpn.status.state.isBusy)
+                .disabled(isActive(profile))
+                .padding(.leading, 15)
             }
 
             if isActive(profile), vpn.status.state == .connected {
-                // Exit location: flag + country + public IP (from the external-IP
-                // lookup, refreshed on connect), then the assigned tunnel IP.
-                HStack(spacing: 6) {
-                    if let flag = Self.flagEmoji(monitor.externalIPCountryCode) {
-                        Text(flag).font(.system(size: 12))
-                    }
-                    if let country = Self.countryName(monitor.externalIPCountryCode) {
-                        Text(country).font(.system(size: 11))
-                    }
-                    if monitor.externalIP != "—" {
-                        Text(monitor.externalIP)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
+                if let usage = vpn.usage {
+                    usageLine(usage)
+                        .padding(.leading, 15)
                 }
-                if let ip = vpn.status.assignedIP {
-                    Text(L10n.format("Tunnel %@", ip))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                if let details = vpn.wireGuardDetails {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !details.addresses.isEmpty {
+                            // IPv4 is what people recognise; IPv6 only when there's no IPv4.
+                            let ipv4 = details.addresses.filter { !$0.contains(":") }
+                            detailLine(L10n.format("LAN IP: %@", (ipv4.isEmpty ? details.addresses : ipv4).joined(separator: ", ")))
+                        }
+                        if !details.dnsServers.isEmpty {
+                            detailLine(L10n.format("DNS: %@", details.dnsServers.joined(separator: ", ")))
+                        }
+                    }
+                    .padding(.leading, 15)
                 }
+                if let info = vpn.shadowrocket {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let server = info.serverName, !server.isEmpty {
+                            Text(L10n.format("Node: %@", server))
+                                .font(.system(size: 10))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        if let routing = info.routingDisplayName {
+                            Text(L10n.format("Global routing: %@", routing))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.leading, 15)
+                }
+            }
+
+            if let notice = vpn.notice, notice.profileID == profile.id {
+                Text(notice.message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .lineLimit(5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.leading, 15)
             }
 
             if vpn.status.profileID == profile.id, case .failed(let message) = vpn.status.state {
@@ -126,24 +153,54 @@ struct VPNSectionView: View {
                     .lineLimit(5)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                    .padding(.leading, 15)
             }
         }
     }
 
-    private static func flagEmoji(_ code: String) -> String? {
-        guard code.count == 2 else { return nil }
-        let base: UInt32 = 0x1F1E6
-        var scalars = String.UnicodeScalarView()
-        for u in code.uppercased().unicodeScalars {
-            guard u.value >= 65, u.value <= 90, let s = UnicodeScalar(base + u.value - 65) else { return nil }
-            scalars.append(s)
-        }
-        return String(scalars)
+    /// Marks a WireGuard tunnel whose On-Demand is on: the system brings it
+    /// back up on its own, and Disconnect turns On-Demand off first.
+    private var onDemandBadge: some View {
+        LText("On-Demand")
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            .help(L10n.text("On-Demand is on in the WireGuard app: the system connects this tunnel on its own. Disconnect turns On-Demand off; Connect turns it back on."))
     }
 
-    private static func countryName(_ code: String) -> String? {
-        guard code.count == 2 else { return nil }
-        return Locale.current.localizedString(forRegionCode: code.uppercased())
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
+        formatter.countStyle = .decimal
+        formatter.isAdaptive = true
+        formatter.zeroPadsFractionDigits = false
+        return formatter
+    }()
+
+    /// Totals since connecting on one line, the live rate on the next.
+    private func usageLine(_ usage: VPNUsage) -> some View {
+        let total = { (bytes: UInt64) in Self.byteFormatter.string(fromByteCount: Int64(clamping: bytes)) }
+        let rate = { (bytesPerSecond: Double) in RateFormatter.formatRate(bytesPerSecond, useBits: useBits) }
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(L10n.format("Total: %@", "↓ \(total(usage.bytesIn))  ↑ \(total(usage.bytesOut))"))
+            Text(L10n.format("Speed: %@", "↓ \(rate(usage.rateIn))  ↑ \(rate(usage.rateOut))"))
+                .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 10))
+        .monospacedDigit()
+        .lineLimit(1)
+    }
+
+    private func detailLine(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
     }
 
     private func serverBinding(_ profile: VPNProfile) -> Binding<Int> {

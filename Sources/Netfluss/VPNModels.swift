@@ -174,6 +174,23 @@ enum VPNConnectionState: Equatable, Sendable {
     var isActive: Bool { self == .connected || self == .connecting || self == .reconnecting }
 }
 
+extension VPNProfile {
+    /// A service from the system's network settings (System Settings, or a VPN
+    /// app such as WireGuard or Shadowrocket), started and stopped by name.
+    var isSystemService: Bool {
+        kind == .ikev2 && ikev2Server == nil && nativeServiceName != nil
+    }
+}
+
+/// Traffic through the active tunnel: totals since it connected and the
+/// current per-second rate.
+struct VPNUsage: Equatable, Sendable {
+    var bytesIn: UInt64
+    var bytesOut: UInt64
+    var rateIn: Double
+    var rateOut: Double
+}
+
 struct VPNRuntimeStatus: Equatable, Sendable {
     var state: VPNConnectionState = .idle
     var profileID: UUID?

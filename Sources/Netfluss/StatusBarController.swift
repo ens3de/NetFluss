@@ -17,6 +17,7 @@
 
 import AppKit
 import Combine
+import Network
 import SwiftUI
 
 extension Notification.Name {
@@ -73,20 +74,34 @@ private struct MenuBarDisplayModel {
     let accessories: MenuBarAccessories
 }
 
-/// Optional status marks drawn to the right of the rates: a VPN indicator
-/// (dot or shield) and the flag of the public IP's country (issue #60).
+/// Optional status marks around the rates: on the left, the connection mark
+/// (the connected VPN's name and state, else the Wi-Fi / hotspot / wired
+/// icon); on the right, a VPN indicator (dot or shield) and the flag of the
+/// public IP's country (issue #60).
 private struct MenuBarAccessories {
     enum VPNMark {
         case dot(active: Bool, color: NSColor, diameter: CGFloat)
         case symbol(NSImage)
     }
 
+    /// Icon plus optional label drawn left of the rates.
+    struct ConnectionMark {
+        let image: NSImage
+        let text: String?
+        let font: NSFont
+        let textColor: NSColor
+        /// Below 1 while a VPN is still connecting or disconnecting.
+        var opacity: CGFloat = 1
+    }
+
+    let connection: ConnectionMark?
     let vpn: VPNMark?
     let flag: String?
     let flagFont: NSFont
 
-    static let none = MenuBarAccessories(vpn: nil, flag: nil, flagFont: .systemFont(ofSize: 10))
+    static let none = MenuBarAccessories(connection: nil, vpn: nil, flag: nil, flagFont: .systemFont(ofSize: 10))
 
+    /// Whether there is anything to draw right of the rates.
     var isEmpty: Bool { vpn == nil && flag == nil }
 }
 
@@ -128,7 +143,7 @@ private final class MenuBarRatesView: NSView {
     }
 
     static func preferredWidth(for model: MenuBarDisplayModel) -> CGFloat {
-        ceil(ratesWidth(for: model) + trailingReserve(for: model))
+        ceil(leadingReserve(for: model) + ratesWidth(for: model) + trailingReserve(for: model))
     }
 
     private static func ratesWidth(for model: MenuBarDisplayModel) -> CGFloat {
@@ -188,6 +203,15 @@ private final class MenuBarRatesView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let model else { return }
 
+        // The connection mark takes a strip on the left; everything else is
+        // drawn shifted right of it, in `contentWidth`.
+        drawConnectionMark(model)
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let shift = NSAffineTransform()
+        shift.translateX(by: Self.leadingReserve(for: model), yBy: 0)
+        shift.concat()
+
         switch model.style {
         case .stack:
             drawStack(model)
@@ -197,6 +221,47 @@ private final class MenuBarRatesView: NSView {
             drawDashboard(model)
         }
         drawAccessories(model)
+    }
+
+    // MARK: Connection mark (left of the rates)
+
+    private static let connectionMarkSpacing: CGFloat = 3
+
+    private static func connectionMarkWidth(_ mark: MenuBarAccessories.ConnectionMark) -> CGFloat {
+        var width = mark.image.size.width
+        if let text = mark.text {
+            width += connectionMarkSpacing + ceil((text as NSString).size(withAttributes: [.font: mark.font]).width)
+        }
+        return width
+    }
+
+    /// Width taken left of the rates by the connection mark.
+    private static func leadingReserve(for model: MenuBarDisplayModel) -> CGFloat {
+        guard let mark = model.accessories.connection else { return 0 }
+        return horizontalPadding + connectionMarkWidth(mark)
+    }
+
+    /// Width the rates and right-hand accessories are laid out in.
+    private var contentWidth: CGFloat {
+        guard let model else { return bounds.width }
+        return bounds.width - Self.leadingReserve(for: model)
+    }
+
+    private func drawConnectionMark(_ model: MenuBarDisplayModel) {
+        guard let mark = model.accessories.connection else { return }
+        let midY = bounds.midY
+        var x = Self.horizontalPadding
+        let imageSize = mark.image.size
+        mark.image.draw(
+            in: NSRect(x: x, y: floor(midY - imageSize.height / 2), width: imageSize.width, height: imageSize.height),
+            from: .zero, operation: .sourceOver, fraction: mark.opacity, respectFlipped: true, hints: nil
+        )
+        x += imageSize.width + Self.connectionMarkSpacing
+        if let text = mark.text {
+            let attributes: [NSAttributedString.Key: Any] = [.font: mark.font, .foregroundColor: mark.textColor]
+            let size = (text as NSString).size(withAttributes: attributes)
+            (text as NSString).draw(at: NSPoint(x: x, y: floor(midY - size.height / 2)), withAttributes: attributes)
+        }
     }
 
     // MARK: Accessories (VPN indicator + country flag)
@@ -224,9 +289,9 @@ private final class MenuBarRatesView: NSView {
     private func accessoryTrailingEdge(for model: MenuBarDisplayModel) -> CGFloat {
         switch model.style {
         case .stack:
-            return bounds.width - Self.stackHorizontalPadding
+            return contentWidth - Self.stackHorizontalPadding
         case .unified, .dashboard, .dashboardBasic:
-            return bounds.width - Self.horizontalPadding - Self.capsulePadding
+            return contentWidth - Self.horizontalPadding - Self.capsulePadding
         }
     }
 
@@ -281,8 +346,8 @@ private final class MenuBarRatesView: NSView {
 
     /// Horizontal extent the rates are drawn in, leaving room for the accessories.
     private var ratesWidthInBounds: CGFloat {
-        guard let model else { return bounds.width }
-        return bounds.width - Self.trailingReserve(for: model)
+        guard let model else { return contentWidth }
+        return contentWidth - Self.trailingReserve(for: model)
     }
 
     private func drawStack(_ model: MenuBarDisplayModel) {
@@ -333,7 +398,7 @@ private final class MenuBarRatesView: NSView {
         let capsuleRect = NSRect(
             x: Self.horizontalPadding,
             y: floor((bounds.height - capsuleHeight) / 2),
-            width: bounds.width - (Self.horizontalPadding * 2),
+            width: contentWidth - (Self.horizontalPadding * 2),
             height: capsuleHeight
         )
 
@@ -369,7 +434,7 @@ private final class MenuBarRatesView: NSView {
         let capsuleRect = NSRect(
             x: Self.horizontalPadding,
             y: floor((bounds.height - 20) / 2),
-            width: bounds.width - (Self.horizontalPadding * 2),
+            width: contentWidth - (Self.horizontalPadding * 2),
             height: 20
         )
 
@@ -541,6 +606,22 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
     private let contextMenu = NSMenu()
     private let pinnedWindowController = PinnedMenuBarWindowController()
     private var cancellables: Set<AnyCancellable> = []
+    /// How the Mac reaches the network, for the connection mark when no VPN
+    /// is up. A personal hotspot is reported as an expensive path.
+    private enum PathKind: String { case wifi, hotspot, wired, offline }
+    private let pathMonitor = NWPathMonitor()
+    private var pathKind: PathKind = .wifi
+    /// Menu bar icons of the app behind each system VPN service — normal and
+    /// "not connected" variants — looked up once per service. Nil when the
+    /// service has no app (built-in IKEv2) or the app's icon isn't known.
+    private var vpnStatusIcons: [String: (normal: NSImage, dimmed: NSImage?)?] = [:]
+
+    /// The status-item images VPN apps draw in their own menu bar item, by the
+    /// app's bundle identifier: (connected, not-connected) asset names.
+    private static let vpnStatusIconAssets: [String: (normal: String, dimmed: String?)] = [
+        "com.wireguard.macos": ("StatusBarIcon", "StatusBarIconDimmed"),
+        "com.liguangming.Shadowrocket": ("macos-status-icon", nil)
+    ]
     private let ratesView = MenuBarRatesView()
     private var highlightPlaceholderImage: NSImage?
     private var cachedFonts: [FontState: NSFont] = [:]
@@ -611,6 +692,34 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
                 self?.updateLabel()
             }
             .store(in: &cancellables)
+
+        // The connection mark follows the VPN state and the network path.
+        VPNManager.shared.$status
+            .map { "\($0.state)|\($0.profileID?.uuidString ?? "")" }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateLabel()
+            }
+            .store(in: &cancellables)
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let kind: PathKind
+            if path.status != .satisfied {
+                kind = .offline
+            } else if path.isExpensive {
+                kind = .hotspot
+            } else if path.usesInterfaceType(.wifi) {
+                kind = .wifi
+            } else {
+                kind = .wired
+            }
+            DispatchQueue.main.async {
+                guard let self, self.pathKind != kind else { return }
+                self.pathKind = kind
+                self.updateLabel()
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "com.local.netfluss.menubar-path"))
 
         // VPN indicator / country flag can change between rate ticks.
         monitor.$vpnActive
@@ -1331,12 +1440,100 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         }
 
         let flag = showFlag ? CountryFlag.emoji(for: monitor.externalIPCountryCode) : nil
+        let (connection, connectionKey) = connectionMark(fontSize: fontSize, textColor: defaultTextColor)
         let accessories = MenuBarAccessories(
+            connection: connection,
             vpn: vpnMark,
             flag: flag,
             flagFont: .systemFont(ofSize: CGFloat(fontSize) + 2)
         )
-        return (accessories, "\(vpnKey)|\(flag ?? "")")
+        return (accessories, "\(vpnKey)|\(flag ?? "")|\(connectionKey)")
+    }
+
+    /// The mark left of the rates: while a VPN profile is up, the menu bar icon
+    /// of the app providing it (WireGuard, Shadowrocket) — its dimmed variant,
+    /// or faded, while still connecting or disconnecting — or a shield for VPNs
+    /// without such an app; otherwise the icon of how the Mac is online —
+    /// Wi-Fi, personal hotspot or wired.
+    private func connectionMark(
+        fontSize: Double,
+        textColor: NSColor
+    ) -> (MenuBarAccessories.ConnectionMark?, String) {
+        let vpn = VPNManager.shared
+        let font = NSFont.systemFont(ofSize: CGFloat(fontSize), weight: .medium)
+        let busy = vpn.status.state != .connected
+        if vpn.status.state.isActive || vpn.status.state == .disconnecting,
+           let id = vpn.status.profileID,
+           let profile = vpn.profiles.first(where: { $0.id == id }),
+           let service = profile.nativeServiceName,
+           let icons = vpnStatusIcon(service: service) {
+            let base = busy ? (icons.dimmed ?? icons.normal) : icons.normal
+            let mark = MenuBarAccessories.ConnectionMark(
+                image: Self.tinted(base, with: textColor),
+                text: nil,
+                font: font,
+                textColor: textColor,
+                opacity: busy && icons.dimmed == nil ? 0.45 : 1
+            )
+            return (mark, "app:\(service):\(busy ? "busy" : "up"):\(textColor.hashValue)")
+        }
+
+        let symbolName: String
+        let symbolColor: NSColor
+        if vpn.status.state.isActive || vpn.status.state == .disconnecting, vpn.status.profileID != nil {
+            symbolName = busy ? "shield.lefthalf.filled" : "lock.shield.fill"
+            symbolColor = busy ? .systemOrange : .systemGreen
+        } else if monitor.vpnActive {
+            // A VPN NetFluss has no profile for.
+            symbolName = "lock.shield.fill"
+            symbolColor = .systemGreen
+        } else {
+            switch pathKind {
+            case .wifi: symbolName = "wifi"
+            case .hotspot: symbolName = "personalhotspot"
+            case .wired: symbolName = "network"
+            case .offline: symbolName = "wifi.slash"
+            }
+            symbolColor = textColor
+        }
+        // Sized like the system's own menu bar icons (13 pt, as Control
+        // Center's Wi-Fi), not like the smaller rate text beside it.
+        let pointSize = max(NSFont.systemFontSize, CGFloat(fontSize))
+        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [symbolColor]))
+        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName)?
+            .withSymbolConfiguration(configuration) else {
+            return (nil, "none")
+        }
+        let mark = MenuBarAccessories.ConnectionMark(image: image, text: nil, font: font, textColor: textColor)
+        return (mark, [symbolName, "\(symbolColor.hashValue)", "\(fontSize)"].joined(separator: ":"))
+    }
+
+    /// The providing app's own menu bar icons, loaded from its asset catalog.
+    private func vpnStatusIcon(service: String) -> (normal: NSImage, dimmed: NSImage?)? {
+        if let cached = vpnStatusIcons[service] { return cached }
+        let icons: (normal: NSImage, dimmed: NSImage?)? = {
+            guard let bundleID = NativeVPN.snapshot(of: service)?.providerBundleID,
+                  let assets = Self.vpnStatusIconAssets[bundleID],
+                  let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
+                  let bundle = Bundle(url: url),
+                  let normal = bundle.image(forResource: assets.normal) else {
+                return nil
+            }
+            return (normal, assets.dimmed.flatMap { bundle.image(forResource: $0) })
+        }()
+        vpnStatusIcons[service] = icons
+        return icons
+    }
+
+    /// A template image filled with `color`, as the menu bar would render it.
+    private static func tinted(_ template: NSImage, with color: NSColor) -> NSImage {
+        NSImage(size: template.size, flipped: false) { rect in
+            template.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
     }
 
     private func menuBarFont(size: Double, design: String, weight: NSFont.Weight) -> NSFont {

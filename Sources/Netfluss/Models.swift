@@ -213,6 +213,20 @@ struct WifiNetwork: Identifiable, Equatable, Sendable {
     let isSaved: Bool        // Known to macOS via stored network profiles
     let isPinned: Bool       // User-pinned in NetFluss preferences
     let isAvailable: Bool    // false when synthesised for an out-of-range pinned SSID
+
+    /// Whether this looks like a phone's personal hotspot. CoreWLAN doesn't
+    /// flag those, so it goes by the name phones give their hotspot by default
+    /// ("Anna's iPhone", "张三的 iPhone", "Galaxy S24", "HUAWEI P60", …).
+    var isPhoneHotspot: Bool {
+        let name = ssid.lowercased()
+        return Self.phoneHotspotNameHints.contains { name.contains($0) }
+    }
+
+    private static let phoneHotspotNameHints = [
+        "iphone", "ipad", "android", "手机", "手機", "hotspot", "热点", "熱點",
+        "galaxy", "pixel", "huawei", "honor", "xiaomi", "redmi", "oppo", "vivo",
+        "oneplus", "realme", "iqoo", "meizu", "nokia", "motorola", "moto "
+    ]
 }
 
 /// The customisable sections of the popover, in their default top-to-bottom

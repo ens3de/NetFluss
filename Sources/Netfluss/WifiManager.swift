@@ -272,18 +272,24 @@ final class WifiManager: NSObject, ObservableObject {
         }
 
         // Sort order:
-        //   1. Pinned networks, most-recently-pinned first.
-        //   2. Currently-connected (when it isn't already pinned).
-        //   3. Everything else by descending RSSI.
+        //   1. Currently connected.
+        //   2. Pinned networks, most-recently-pinned first.
+        //   3. Nearby phone hotspots.
+        //   4. Networks with a saved password.
+        //   5. Everything else by descending RSSI (also the tie-break above).
         let pinIndex: (String) -> Int = { [pinnedSSIDs] ssid in
             pinnedSSIDs.firstIndex(of: ssid) ?? Int.max
         }
         collected.sort { lhs, rhs in
+            if lhs.net.isCurrent != rhs.net.isCurrent { return lhs.net.isCurrent }
             if lhs.net.isPinned != rhs.net.isPinned { return lhs.net.isPinned }
             if lhs.net.isPinned, rhs.net.isPinned {
                 return pinIndex(lhs.net.ssid) < pinIndex(rhs.net.ssid)
             }
-            if lhs.net.isCurrent != rhs.net.isCurrent { return lhs.net.isCurrent }
+            let lhsHotspot = lhs.net.isPhoneHotspot && lhs.net.isAvailable
+            let rhsHotspot = rhs.net.isPhoneHotspot && rhs.net.isAvailable
+            if lhsHotspot != rhsHotspot { return lhsHotspot }
+            if lhs.net.isSaved != rhs.net.isSaved { return lhs.net.isSaved }
             let lr = lhs.net.rssi ?? Int.min
             let rr = rhs.net.rssi ?? Int.min
             return lr > rr

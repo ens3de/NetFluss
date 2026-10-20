@@ -465,7 +465,6 @@
 "Internal" = "Intern";
 "External" = "Extern";
 "%ld VPNs" = "%ld VPNs";
-"Tunnel %@" = "Tunnel %@";
 "Noise" = "Rauschen";
 "SNR" = "SNR";
 "Tx Rate" = "Senderate";
@@ -586,3 +585,28 @@
 "The M-Lab upload server URL is missing." = "Die URL des M-Lab-Upload-Servers fehlt.";
 "The M-Lab upload socket closed unexpectedly." = "Die M-Lab-Upload-Verbindung wurde unerwartet geschlossen.";
 "Auto-selected nearby edge" = "Automatisch gewählter nahegelegener Edge-Server";
+
+/* WireGuard app On-Demand */
+"NetFluss needs Accessibility access to change On-Demand in the WireGuard app. Allow it in System Settings → Privacy & Security → Accessibility, then try again." = "NetFluss benötigt Bedienungshilfen-Zugriff, um „Bei Bedarf“ in der WireGuard-App zu ändern. Erlaube ihn unter Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen und versuche es erneut.";
+"The WireGuard app is not installed." = "Die WireGuard-App ist nicht installiert.";
+"The WireGuard app did not start." = "Die WireGuard-App wurde nicht gestartet.";
+"The WireGuard menu bar icon was not found." = "Das WireGuard-Symbol in der Menüleiste wurde nicht gefunden.";
+"The WireGuard menu did not open." = "Das WireGuard-Menü wurde nicht geöffnet.";
+"The tunnel \"%@\" is not in the WireGuard menu." = "Der Tunnel „%@“ ist nicht im WireGuard-Menü.";
+"The WireGuard app did not respond (error %d)." = "Die WireGuard-App hat nicht reagiert (Fehler %d).";
+
+/* Shadowrocket details */
+"Node: %@" = "Server: %@";
+"Global routing: %@" = "Globales Routing: %@";
+"Config" = "Konfiguration";
+"Proxy" = "Proxy";
+"Direct" = "Direkt";
+"Scene" = "Szene";
+
+/* WireGuard app tunnel details */
+"LAN IP: %@" = "LAN-IP: %@";
+"DNS: %@" = "DNS: %@";
+"On-Demand" = "Bei Bedarf";
+"On-Demand is on in the WireGuard app: the system connects this tunnel on its own. Disconnect turns On-Demand off; Connect turns it back on." = "„Bei Bedarf“ ist in der WireGuard-App aktiv: Das System verbindet diesen Tunnel selbstständig. Trennen schaltet „Bei Bedarf“ aus, Verbinden wieder ein.";
+"Total: %@" = "Gesamt: %@";
+"Speed: %@" = "Tempo: %@";

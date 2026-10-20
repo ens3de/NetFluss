@@ -465,7 +465,6 @@
 "Internal" = "Internal";
 "External" = "External";
 "%ld VPNs" = "%ld VPNs";
-"Tunnel %@" = "Tunnel %@";
 "Noise" = "Noise";
 "SNR" = "SNR";
 "Tx Rate" = "Tx Rate";
@@ -586,3 +585,28 @@
 "The M-Lab upload server URL is missing." = "The M-Lab upload server URL is missing.";
 "The M-Lab upload socket closed unexpectedly." = "The M-Lab upload socket closed unexpectedly.";
 "Auto-selected nearby edge" = "Auto-selected nearby edge";
+
+/* WireGuard app On-Demand */
+"NetFluss needs Accessibility access to change On-Demand in the WireGuard app. Allow it in System Settings → Privacy & Security → Accessibility, then try again." = "NetFluss needs Accessibility access to change On-Demand in the WireGuard app. Allow it in System Settings → Privacy & Security → Accessibility, then try again.";
+"The WireGuard app is not installed." = "The WireGuard app is not installed.";
+"The WireGuard app did not start." = "The WireGuard app did not start.";
+"The WireGuard menu bar icon was not found." = "The WireGuard menu bar icon was not found.";
+"The WireGuard menu did not open." = "The WireGuard menu did not open.";
+"The tunnel \"%@\" is not in the WireGuard menu." = "The tunnel \"%@\" is not in the WireGuard menu.";
+"The WireGuard app did not respond (error %d)." = "The WireGuard app did not respond (error %d).";
+
+/* Shadowrocket details */
+"Node: %@" = "Node: %@";
+"Global routing: %@" = "Global routing: %@";
+"Config" = "Config";
+"Proxy" = "Proxy";
+"Direct" = "Direct";
+"Scene" = "Scene";
+
+/* WireGuard app tunnel details */
+"LAN IP: %@" = "LAN IP: %@";
+"DNS: %@" = "DNS: %@";
+"On-Demand" = "On-Demand";
+"On-Demand is on in the WireGuard app: the system connects this tunnel on its own. Disconnect turns On-Demand off; Connect turns it back on." = "On-Demand is on in the WireGuard app: the system connects this tunnel on its own. Disconnect turns On-Demand off; Connect turns it back on.";
+"Total: %@" = "Total: %@";
+"Speed: %@" = "Speed: %@";

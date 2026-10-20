@@ -465,7 +465,6 @@
 "Internal" = "內部";
 "External" = "外部";
 "%ld VPNs" = "%ld 個 VPN";
-"Tunnel %@" = "通道 %@";
 "Noise" = "雜訊";
 "SNR" = "訊噪比";
 "Tx Rate" = "傳送速率";
@@ -586,3 +585,28 @@
 "The M-Lab upload server URL is missing." = "缺少 M-Lab 上傳伺服器 URL。";
 "The M-Lab upload socket closed unexpectedly." = "M-Lab 上傳連線意外關閉。";
 "Auto-selected nearby edge" = "自動選擇的附近邊緣節點";
+
+/* WireGuard app On-Demand */
+"NetFluss needs Accessibility access to change On-Demand in the WireGuard app. Allow it in System Settings → Privacy & Security → Accessibility, then try again." = "NetFluss 需要輔助使用權限才能在 WireGuard App 中切換按需啟動。請在「系統設定 → 隱私權與安全性 → 輔助使用」中允許後重試。";
+"The WireGuard app is not installed." = "未安裝 WireGuard App。";
+"The WireGuard app did not start." = "WireGuard App 未能啟動。";
+"The WireGuard menu bar icon was not found." = "找不到 WireGuard 選單列圖像。";
+"The WireGuard menu did not open." = "WireGuard 選單未能打開。";
+"The tunnel \"%@\" is not in the WireGuard menu." = "WireGuard 選單中沒有隧道「%@」。";
+"The WireGuard app did not respond (error %d)." = "WireGuard App 沒有回應（錯誤 %d）。";
+
+/* Shadowrocket details */
+"Node: %@" = "節點：%@";
+"Global routing: %@" = "全域路由：%@";
+"Config" = "配置";
+"Proxy" = "代理";
+"Direct" = "直連";
+"Scene" = "場景";
+
+/* WireGuard app tunnel details */
+"LAN IP: %@" = "區域網路 IP：%@";
+"DNS: %@" = "DNS 伺服器：%@";
+"On-Demand" = "按需";
+"On-Demand is on in the WireGuard app: the system connects this tunnel on its own. Disconnect turns On-Demand off; Connect turns it back on." = "WireGuard App 已開啟按需連線：系統會自動連線此隧道。中斷會關閉按需連線，連線會重新開啟。";
+"Total: %@" = "總流量：%@";
+"Speed: %@" = "網速：%@";

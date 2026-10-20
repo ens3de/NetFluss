@@ -34,6 +34,30 @@ final class VPNManager: ObservableObject {
 
     @Published private(set) var profiles: [VPNProfile] = []
     @Published private(set) var status: VPNRuntimeStatus = .idle
+    /// Why the last disconnect left a profile up (e.g. On-Demand could not be
+    /// turned off). Cleared by the next connect or disconnect.
+    @Published private(set) var notice: (profileID: UUID, message: String)?
+    /// Node and routing mode of Shadowrocket while its tunnel is the active
+    /// profile (nil otherwise, or when Shadowrocket's data can't be read).
+    @Published private(set) var shadowrocket: ShadowrocketInfo?
+    /// Peer, tunnel addresses and DNS of a WireGuard app tunnel while it is the
+    /// active profile.
+    @Published private(set) var wireGuardDetails: WireGuardAppDetails?
+    /// Profiles whose WireGuard app tunnel has On-Demand on, connected or not.
+    @Published private(set) var onDemandProfileIDs: Set<UUID> = []
+    /// Traffic through the connected tunnel: totals since it came up and the
+    /// current rate. Nil while nothing is connected or no counters exist.
+    @Published private(set) var usage: VPNUsage?
+    private var usageSample: (profileID: UUID, bytesIn: UInt64, bytesOut: UInt64, at: Date)?
+    private var usageTask: Task<Void, Never>?
+    /// Views currently showing `usage`; it is only sampled while one is open.
+    private var usageObservers = 0
+    /// System VPN services NetFluss just stopped, until they are seen down (or
+    /// the deadline passes). Their Network Extension takes a moment to tear the
+    /// tunnel down, and the sync must not re-adopt it as connected meanwhile.
+    private var stoppingNativeServices: [String: Date] = [:]
+    private static let nativeStopGrace: TimeInterval = 15
+    private var loggedShadowrocketRouting: String?
 
     /// Set by AppState so the manager can refresh the public IP/flag on
     /// connect/disconnect.
@@ -83,6 +107,7 @@ final class VPNManager: ObservableObject {
         ikev2Controller.onStatusChange = { [weak self] status in
             self?.handleIKEv2Status(status)
         }
+        startNativeStatusSync()
     }
 
     // MARK: - Profile management
@@ -213,7 +238,7 @@ final class VPNManager: ObservableObject {
     }
 
     /// Move a profile one slot up or down. The stored order drives both the
-    /// Preferences list and the popover's profile dropdown.
+    /// Preferences list and the popover's profile list.
     func moveProfile(_ profile: VPNProfile, up: Bool) {
         guard let idx = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         let target = up ? idx - 1 : idx + 1
@@ -285,6 +310,7 @@ final class VPNManager: ObservableObject {
 
     func connect(_ profile: VPNProfile, server: VPNServerEndpoint? = nil) {
         guard !status.state.isActive else { return }
+        notice = nil
         cancelPendingReconnect()
         reconnectAttempts = 0
         ikev2InitialRetries = 0
@@ -318,12 +344,42 @@ final class VPNManager: ObservableObject {
         }
     }
 
+    /// Connect `profile`, disconnecting whatever other tunnel is up first —
+    /// only one runs at a time. If that disconnect fails (the old tunnel stays
+    /// up), the switch is abandoned and the notice explains why.
+    func switchTo(_ profile: VPNProfile) {
+        guard status.state.isActive, status.profileID != profile.id else {
+            connect(profile)
+            return
+        }
+        VPNDiagnosticsLog.shared.log("Switching to \"\(profile.name)\"")
+        disconnect()
+        Task { [weak self] in
+            for _ in 0..<150 {
+                guard let self, self.status.state.isBusy else { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard let self else { return }
+            // Connect only once the old tunnel is really gone: still up means
+            // the disconnect failed (the notice says why); still disconnecting
+            // after the wait means it's stuck, and connecting now would race it.
+            guard !self.status.state.isActive, self.status.state != .disconnecting else {
+                if self.status.state == .disconnecting {
+                    VPNDiagnosticsLog.shared.log("Gave up switching to \"\(profile.name)\": the previous VPN is still disconnecting")
+                }
+                return
+            }
+            self.connect(profile)
+        }
+    }
+
     func disconnect() {
         // Proceed if we're actively connected OR a backend is still lingering: a
         // tunnel can outlive an `.failed` state (e.g. a WireGuard utun that stayed
         // up), and the user must still be able to tear it down. Without this,
         // disconnect() no-ops from `.failed` and orphans the tunnel + temp config.
         guard status.state.isActive || activeTunnelHandle != nil || activeIKEv2 || ovpnClient != nil else { return }
+        notice = nil
         // A deliberate disconnect ends any auto-reconnect cycle.
         cancelPendingReconnect()
         stopWireGuardMonitor()
@@ -354,8 +410,17 @@ final class VPNManager: ObservableObject {
                 if profile.ikev2Server != nil {
                     self.ikev2Controller.disconnect()   // NEVPNManager; status flows via handleIKEv2Status
                     self.activeIKEv2 = false
-                } else if let service = profile.nativeServiceName {
-                    NativeVPN.stop(service)
+                } else if let service = profile.nativeServiceName,
+                          let failure = await self.stopNativeService(service) {
+                    // The tunnel stayed up; keep showing it as connected.
+                    VPNDiagnosticsLog.shared.log("Disconnect \"\(service)\" failed: \(failure)")
+                    self.status = VPNRuntimeStatus(state: .connected, profileID: profile.id,
+                                                   connectedSince: previous.connectedSince)
+                    self.notice = (profile.id, failure)
+                    // disconnect() already restored the system DNS; the
+                    // tunnel's own DNS applies again while it stays up.
+                    self.applyProfileDNSIfNeeded(profile.id)
+                    return
                 }
             }
             self.ovpnClient?.close()
@@ -452,6 +517,156 @@ final class VPNManager: ObservableObject {
         case .log:
             break
         }
+    }
+
+    // MARK: - Usage
+
+    /// Usage is only shown in the popover, so it is sampled (every second)
+    /// only while a view showing it is open.
+    func setUsageVisible(_ visible: Bool) {
+        usageObservers = max(0, usageObservers + (visible ? 1 : -1))
+        if usageObservers > 0, usageTask == nil {
+            usageTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    await self?.sampleUsage()
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            }
+        } else if usageObservers == 0, let task = usageTask {
+            task.cancel()
+            usageTask = nil
+            usageSample = nil
+        }
+    }
+
+    /// One reading of the active tunnel's byte counters. System VPNs are read
+    /// from SystemConfiguration; NetFluss's own tunnels report theirs into
+    /// `status` (OpenVPN's management channel).
+    private func sampleUsage() async {
+        guard status.state == .connected, let id = status.profileID,
+              let profile = profiles.first(where: { $0.id == id }) else {
+            usageSample = nil
+            if usage != nil { usage = nil }
+            return
+        }
+        let counts: (bytesIn: UInt64, bytesOut: UInt64)?
+        if profile.isSystemService, let service = profile.nativeServiceName {
+            counts = await Task.detached(priority: .utility) {
+                NativeVPN.snapshot(of: service).flatMap { NativeVPN.byteCounts(serviceID: $0.serviceID) }
+            }.value
+        } else if status.bytesIn > 0 || status.bytesOut > 0 {
+            counts = (status.bytesIn, status.bytesOut)
+        } else {
+            counts = nil
+        }
+        guard let counts, status.profileID == id else {
+            if usage != nil { usage = nil }
+            return
+        }
+        let now = Date()
+        var rateIn = 0.0, rateOut = 0.0
+        if let previous = usageSample, previous.profileID == id,
+           counts.bytesIn >= previous.bytesIn, counts.bytesOut >= previous.bytesOut {
+            let elapsed = max(now.timeIntervalSince(previous.at), 0.001)
+            rateIn = Double(counts.bytesIn - previous.bytesIn) / elapsed
+            rateOut = Double(counts.bytesOut - previous.bytesOut) / elapsed
+        }
+        usageSample = (id, counts.bytesIn, counts.bytesOut, now)
+        let next = VPNUsage(bytesIn: counts.bytesIn, bytesOut: counts.bytesOut, rateIn: rateIn, rateOut: rateOut)
+        if next != usage { usage = next }
+    }
+
+    // MARK: - System VPN services
+
+    /// System VPN services (WireGuard app, Shadowrocket, System Settings…) can be
+    /// connected or dropped outside NetFluss, and their apps change what they
+    /// expose without notification. Poll them so the popover reflects what is
+    /// actually up.
+    private var nativeSyncTask: Task<Void, Never>?
+    private static let nativeSyncInterval: UInt64 = 3_000_000_000
+
+    private func startNativeStatusSync() {
+        guard nativeSyncTask == nil else { return }
+        nativeSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.syncNative()
+                try? await Task.sleep(nanoseconds: Self.nativeSyncInterval)
+            }
+        }
+    }
+
+    /// One pass over the system VPN services NetFluss has profiles for, from a
+    /// single SystemConfiguration read: track WireGuard On-Demand, adopt or
+    /// drop connections made outside NetFluss, and refresh what the connected
+    /// app exposes about its tunnel.
+    func syncNative() async {
+        let native = profiles.filter(\.isSystemService)
+        let names = Set(native.compactMap(\.nativeServiceName))
+        guard !names.isEmpty else { return }
+        let snapshots = await Task.detached(priority: .utility) { NativeVPN.snapshot(of: names) }.value
+        guard !snapshots.isEmpty else { return }   // read failed; try again next pass
+
+        let onDemand = Set(native.filter { profile in
+            guard let snapshot = profile.nativeServiceName.flatMap({ snapshots[$0] }) else { return false }
+            return snapshot.providerBundleID == WireGuardAppReader.bundleIdentifier && snapshot.isOnDemandEnabled
+        }.map(\.id))
+        if onDemand != onDemandProfileIDs { onDemandProfileIDs = onDemand }
+
+        adoptOrDropNative(native, snapshots: snapshots)
+        await refreshNativeDetails(native, snapshots: snapshots)
+    }
+
+    /// Adopt a system service that came up outside NetFluss, and drop back to
+    /// idle when the one shown as connected is definitely down. Transient
+    /// states (connecting, an On-Demand reassert) leave the status alone.
+    private func adoptOrDropNative(_ native: [VPNProfile], snapshots: [String: NativeVPN.ServiceSnapshot]) {
+        let now = Date()
+        stoppingNativeServices = stoppingNativeServices.filter { service, deadline in
+            deadline > now && !(snapshots[service]?.state.isDown ?? true)
+        }
+        guard !status.state.isBusy else { return }
+
+        if status.state.isActive {
+            guard let id = status.profileID,
+                  let service = native.first(where: { $0.id == id })?.nativeServiceName,
+                  let snapshot = snapshots[service], snapshot.state.isDown else { return }
+            VPNDiagnosticsLog.shared.log("System VPN \"\(service)\" went \(snapshot.state.rawValue) outside NetFluss")
+            status = .idle
+            refreshPublicIP()
+        } else if let profile = native.first(where: { profile in
+            guard let service = profile.nativeServiceName, stoppingNativeServices[service] == nil else { return false }
+            return snapshots[service]?.state == .connected
+        }) {
+            VPNDiagnosticsLog.shared.log("System VPN \"\(profile.nativeServiceName ?? profile.name)\" connected outside NetFluss")
+            status = VPNRuntimeStatus(state: .connected, profileID: profile.id, connectedSince: Date())
+            refreshPublicIP()
+        }
+    }
+
+    /// Shadowrocket's node and routing mode, or a WireGuard tunnel's
+    /// addresses and DNS, for the connected system VPN.
+    private func refreshNativeDetails(_ native: [VPNProfile], snapshots: [String: NativeVPN.ServiceSnapshot]) async {
+        var wireGuard: WireGuardAppDetails?
+        var info: ShadowrocketInfo?
+        if status.state == .connected, let id = status.profileID,
+           let snapshot = native.first(where: { $0.id == id })?.nativeServiceName.flatMap({ snapshots[$0] }),
+           snapshot.state == .connected {
+            switch snapshot.providerBundleID {
+            case WireGuardAppReader.bundleIdentifier?:
+                let serviceID = snapshot.serviceID
+                wireGuard = await Task.detached(priority: .utility) { WireGuardAppReader.details(serviceID: serviceID) }.value
+            case ShadowrocketInfo.bundleIdentifier?:
+                info = await Task.detached(priority: .utility) { ShadowrocketInfo.read() }.value
+            default:
+                break
+            }
+        }
+        if wireGuard != wireGuardDetails { wireGuardDetails = wireGuard }
+        if let routing = info?.routingMethod, routing != loggedShadowrocketRouting {
+            loggedShadowrocketRouting = routing
+            VPNDiagnosticsLog.shared.log("Shadowrocket routing method: \"\(routing)\"")
+        }
+        if info != shadowrocket { shadowrocket = info }
     }
 
     /// Refresh the public IP + country flag now and again shortly after, since
@@ -811,22 +1026,93 @@ final class VPNManager: ObservableObject {
             status.state = .failed(L10n.text("No system VPN service is associated with this profile."))
             return
         }
-        guard NativeVPN.start(service) else {
-            status.state = .failed(L10n.text("Could not start the system VPN."))
-            return
+        let turnedOnDemandOn = await startWireGuardAppOnDemand(service)
+        if !turnedOnDemandOn {
+            guard NativeVPN.start(service) else {
+                status.state = .failed(L10n.text("Could not start the system VPN."))
+                return
+            }
         }
         // Native connect is asynchronous — poll for the Connected state.
+        var state: NativeVPN.ConnectionState?
         for _ in 0..<25 {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard status.profileID == profile.id, status.state.isActive else { return }
-            if NativeVPN.status(service) == "Connected" {
+            state = await Task.detached(priority: .userInitiated) { NativeVPN.snapshot(of: service)?.state }.value
+            if state == .connected {
                 status.state = .connected
                 status.connectedSince = Date()
                 refreshPublicIP()
                 return
             }
         }
-        status.state = .failed(L10n.format("The system VPN did not connect (%@).", NativeVPN.status(service)))
+        if turnedOnDemandOn {
+            // Connect turned On-Demand on; leaving it on after a failed connect
+            // would let the system bring the tunnel up later on its own.
+            _ = await stopNativeService(service)
+        }
+        status.state = .failed(L10n.format("The system VPN did not connect (%@).", state?.rawValue ?? "Unknown"))
+    }
+
+    /// Stops a system VPN service. A WireGuard app tunnel with On-Demand on is
+    /// switched off through the WireGuard app's menu, because a plain stop is
+    /// undone by the system within seconds. Returns why the tunnel could not be
+    /// stopped.
+    private func stopNativeService(_ service: String) async -> String? {
+        stoppingNativeServices[service] = Date().addingTimeInterval(Self.nativeStopGrace)
+        let tunnel = await Task.detached { WireGuardAppReader.tunnel(serviceName: service) }.value
+        guard let tunnel, tunnel.isOnDemandEnabled else {
+            NativeVPN.stop(service)
+            return nil
+        }
+        guard WireGuardAppAutomation.isTrusted(prompt: true) else {
+            return WireGuardAppAutomation.Failure.notTrusted.message
+        }
+        do {
+            let timings = try await Task.detached(priority: .userInitiated) {
+                try WireGuardAppAutomation.clickTunnel(named: service)
+            }.value
+            VPNDiagnosticsLog.shared.log("Turned On-Demand off for \"\(service)\" through the WireGuard app (\(timings))")
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await self?.syncNative()
+            }
+        } catch let failure as WireGuardAppAutomation.Failure {
+            stoppingNativeServices[service] = nil
+            return failure.message
+        } catch {
+            stoppingNativeServices[service] = nil
+            return error.localizedDescription
+        }
+        // The click landed, and the WireGuard app is now tearing the tunnel
+        // down. Report it as disconnected right away rather than waiting for
+        // the Network Extension to finish; if the tunnel somehow stays up, the
+        // native status sync adopts it again as connected.
+        return nil
+    }
+
+    /// Connects a WireGuard app tunnel that has On-Demand rules the way the
+    /// WireGuard app's own menu does — by turning On-Demand back on — so a
+    /// tunnel NetFluss disconnected gets its On-Demand back. Returns false when
+    /// this doesn't apply (or fails), and the caller falls back to a plain start.
+    private func startWireGuardAppOnDemand(_ service: String) async -> Bool {
+        let tunnel = await Task.detached { WireGuardAppReader.tunnel(serviceName: service) }.value
+        guard let tunnel, tunnel.hasOnDemandRules, !tunnel.isOnDemandEnabled,
+              WireGuardAppAutomation.isTrusted(prompt: false) else { return false }
+        do {
+            let timings = try await Task.detached(priority: .userInitiated) {
+                try WireGuardAppAutomation.clickTunnel(named: service)
+            }.value
+            VPNDiagnosticsLog.shared.log("Turned On-Demand on for \"\(service)\" through the WireGuard app (\(timings))")
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await self?.syncNative()
+            }
+            return true
+        } catch {
+            VPNDiagnosticsLog.shared.log("WireGuard app On-Demand on failed: \(error)")
+            return false
+        }
     }
 
     /// Parse the local [Interface] Address from a WireGuard config for display.
