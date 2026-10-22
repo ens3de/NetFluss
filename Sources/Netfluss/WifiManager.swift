@@ -38,6 +38,10 @@ final class WifiManager: NSObject, ObservableObject {
     @Published private(set) var pinnedSSIDs: [String] = []   // last pinned first
 
     private static let pinnedDefaultsKey = "pinnedWifiSSIDs"
+    /// SSIDs of the user's own phone hotspots, listed after the saved networks
+    /// while in range. macOS can't tell other apps which nearby networks are
+    /// phone hotspots, so they are named here.
+    private static let hotspotsDefaultsKey = "wifiHotspotSSIDs"
 
     private let interface: CWInterface?
     private let locationManager = CLLocationManager()
@@ -138,6 +142,7 @@ final class WifiManager: NSObject, ObservableObject {
         guard let interface else { return }
         let currentSSID = interface.ssid()
         self.currentSSID = currentSSID
+        let hotspotSSIDs = UserDefaults.standard.stringArray(forKey: Self.hotspotsDefaultsKey) ?? []
 
         let savedSSIDs: Set<String> = {
             guard let profiles = interface.configuration()?.networkProfiles else { return [] }
@@ -203,6 +208,7 @@ final class WifiManager: NSObject, ObservableObject {
                     isCurrent: isCurrentRow,
                     isSaved: savedSSIDs.contains(ssid),
                     isPinned: pinnedSSIDs.contains(ssid),
+                    isHotspot: hotspotSSIDs.contains(ssid),
                     isAvailable: true
                 ),
                 net
@@ -236,6 +242,7 @@ final class WifiManager: NSObject, ObservableObject {
                         isCurrent: true,
                         isSaved: savedSSIDs.contains(currentSSID),
                         isPinned: pinnedSSIDs.contains(currentSSID),
+                        isHotspot: hotspotSSIDs.contains(currentSSID),
                         isAvailable: true
                     ),
                     // No CWNetwork object for the active connection; connect()
@@ -248,6 +255,7 @@ final class WifiManager: NSObject, ObservableObject {
 
         // Synthesise placeholder rows for any pinned SSID that isn't visible
         // right now, so the user can still see (and try to reconnect to) it.
+        // The user's hotspots are only listed while they are in range.
         for ssid in pinnedSSIDs where !collected.contains(where: { $0.net.ssid == ssid }) {
             collected.append(
                 (
@@ -263,7 +271,8 @@ final class WifiManager: NSObject, ObservableObject {
                         band: nil,
                         isCurrent: false,
                         isSaved: savedSSIDs.contains(ssid),
-                        isPinned: true,
+                        isPinned: pinnedSSIDs.contains(ssid),
+                        isHotspot: hotspotSSIDs.contains(ssid),
                         isAvailable: false
                     ),
                     CWNetwork()
@@ -273,26 +282,34 @@ final class WifiManager: NSObject, ObservableObject {
 
         // Sort order:
         //   1. Currently connected.
-        //   2. Pinned networks, most-recently-pinned first.
-        //   3. Nearby phone hotspots.
-        //   4. Networks with a saved password.
+        //   2. Saved networks in range.
+        //   3. The user's own hotspots in range, in their listed order.
+        //   4. Pinned networks, most-recently-pinned first.
         //   5. Everything else by descending RSSI (also the tie-break above).
+        let rank: (WifiNetwork) -> Int = { network in
+            if network.isCurrent { return 0 }
+            if network.isHotspot { return 2 }
+            if network.isSaved, network.isAvailable { return 1 }
+            if network.isPinned { return 3 }
+            return 4
+        }
         let pinIndex: (String) -> Int = { [pinnedSSIDs] ssid in
             pinnedSSIDs.firstIndex(of: ssid) ?? Int.max
         }
+        let hotspotIndex: (String) -> Int = { ssid in
+            hotspotSSIDs.firstIndex(of: ssid) ?? Int.max
+        }
         collected.sort { lhs, rhs in
-            if lhs.net.isCurrent != rhs.net.isCurrent { return lhs.net.isCurrent }
-            if lhs.net.isPinned != rhs.net.isPinned { return lhs.net.isPinned }
-            if lhs.net.isPinned, rhs.net.isPinned {
-                return pinIndex(lhs.net.ssid) < pinIndex(rhs.net.ssid)
+            let (l, r) = (lhs.net, rhs.net)
+            if rank(l) != rank(r) { return rank(l) < rank(r) }
+            switch rank(l) {
+            case 2 where hotspotIndex(l.ssid) != hotspotIndex(r.ssid):
+                return hotspotIndex(l.ssid) < hotspotIndex(r.ssid)
+            case 3 where pinIndex(l.ssid) != pinIndex(r.ssid):
+                return pinIndex(l.ssid) < pinIndex(r.ssid)
+            default:
+                return (l.rssi ?? Int.min) > (r.rssi ?? Int.min)
             }
-            let lhsHotspot = lhs.net.isPhoneHotspot && lhs.net.isAvailable
-            let rhsHotspot = rhs.net.isPhoneHotspot && rhs.net.isAvailable
-            if lhsHotspot != rhsHotspot { return lhsHotspot }
-            if lhs.net.isSaved != rhs.net.isSaved { return lhs.net.isSaved }
-            let lr = lhs.net.rssi ?? Int.min
-            let rr = rhs.net.rssi ?? Int.min
-            return lr > rr
         }
 
         self.networks = collected.map(\.net)
@@ -413,7 +430,8 @@ final class WifiManager: NSObject, ObservableObject {
                     band: nil,
                     isCurrent: false,
                     isSaved: network.isSaved,
-                    isPinned: true,
+                    isPinned: network.isPinned,
+                    isHotspot: network.isHotspot,
                     isAvailable: true
                 )
                 self.connectingTo = nil

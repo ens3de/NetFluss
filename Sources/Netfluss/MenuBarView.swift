@@ -1485,7 +1485,7 @@ struct WifiNetworkRow: View {
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
                             }
-                            if network.isPhoneHotspot {
+                            if network.isHotspot {
                                 Image(systemName: "personalhotspot")
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)

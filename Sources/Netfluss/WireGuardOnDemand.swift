@@ -97,13 +97,6 @@ enum WireGuardAppAutomation {
         }
     }
 
-    /// Whether NetFluss may drive other apps. `prompt` shows the system's
-    /// Accessibility request when access has not been granted yet.
-    static func isTrusted(prompt: Bool) -> Bool {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        return AXIsProcessTrustedWithOptions([key: prompt] as CFDictionary)
-    }
-
     /// Clicks the WireGuard menu item for `tunnelName`. Blocks for up to a few
     /// seconds while the WireGuard app launches and its menu opens, so call it
     /// off the main thread.
@@ -120,7 +113,7 @@ enum WireGuardAppAutomation {
     @discardableResult
     static func clickTunnel(named tunnelName: String) throws -> String {
         let clock = StepClock()
-        guard isTrusted(prompt: false) else { throw Failure.notTrusted }
+        guard AX.isTrusted(prompt: false) else { throw Failure.notTrusted }
         let (pid, launched) = try runningWireGuardPID()
         guard launched else {
             try clickTunnel(named: tunnelName, pid: pid, clock: clock, attempts: 1)
@@ -143,7 +136,7 @@ enum WireGuardAppAutomation {
         // tracking, and AX calls into it can otherwise wait the default 6 s.
         AXUIElementSetMessagingTimeout(app, 1.5)
 
-        guard let statusItem = waitFor(timeout: 5, { children(of: attribute(app, "AXExtrasMenuBar")).first }) else {
+        guard let statusItem = AX.waitFor(timeout: 5, { AX.children(of: AX.attribute(app, "AXExtrasMenuBar")).first }) else {
             throw Failure.statusItemNotFound
         }
         clock.mark("status item")
@@ -154,10 +147,10 @@ enum WireGuardAppAutomation {
             // The press opens the menu, but the app does not reply until menu
             // tracking ends — so don't wait for that reply at all; the press is
             // delivered regardless, and the menu shows up in the AX tree.
-            press(statusItem)
+            AX.pressWithoutWaiting(statusItem)
             // Queries are answered from inside menu tracking; give them room again.
             AXUIElementSetMessagingTimeout(statusItem, 1.5)
-            guard let opened = waitFor(timeout: 2, { children(of: statusItem).first }) else {
+            guard let opened = AX.waitFor(timeout: 2, { AX.children(of: statusItem).first }) else {
                 throw Failure.menuDidNotOpen
             }
             clock.mark("menu open")
@@ -171,7 +164,7 @@ enum WireGuardAppAutomation {
         clock.mark("item found")
         // Like the status item, the menu item's reply can trail the click (the
         // app runs its handler first); a timeout still means it was delivered.
-        let result = press(item)
+        let result = AX.pressWithoutWaiting(item)
         guard result == .success || result == .cannotComplete else {
             _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
             throw Failure.pressFailed(result.rawValue)
@@ -183,7 +176,7 @@ enum WireGuardAppAutomation {
     /// toggled On-Demand flag (quitting earlier could drop the save).
     private static func quitWhenSaved(pid: pid_t, tunnelName: String, onDemandBefore: Bool?) {
         if let onDemandBefore {
-            _ = waitFor(timeout: 3) {
+            _ = AX.waitFor(timeout: 3) {
                 WireGuardAppReader.tunnel(serviceName: tunnelName)?.isOnDemandEnabled != onDemandBefore ? true : nil
             }
         } else {
@@ -192,13 +185,6 @@ enum WireGuardAppAutomation {
             Thread.sleep(forTimeInterval: 1)
         }
         NSRunningApplication(processIdentifier: pid)?.terminate()
-    }
-
-    /// Presses `element` without waiting for the app's reply.
-    @discardableResult
-    private static func press(_ element: AXUIElement) -> AXError {
-        AXUIElementSetMessagingTimeout(element, 0.005)
-        return AXUIElementPerformAction(element, kAXPressAction as CFString)
     }
 
     /// Matches the titles `TunnelMenuItem.updateTitle()` sets: the bare tunnel
@@ -212,8 +198,8 @@ enum WireGuardAppAutomation {
     /// One request per menu item (role and title together); submenus are only
     /// opened up when the tunnel is not at the top level.
     private static func findTunnelItem(named tunnelName: String, in menu: AXUIElement) -> AXUIElement? {
-        let items = children(of: menu).compactMap { item -> (AXUIElement, String)? in
-            let values = attributes(item, [kAXRoleAttribute, kAXTitleAttribute])
+        let items = AX.children(of: menu).compactMap { item -> (AXUIElement, String)? in
+            let values = AX.attributes(item, [kAXRoleAttribute, kAXTitleAttribute])
             guard values.first as? String == kAXMenuItemRole else { return nil }
             return (item, values.last as? String ?? "")
         }
@@ -221,7 +207,7 @@ enum WireGuardAppAutomation {
             return match.0
         }
         for (item, title) in items where !title.isEmpty {
-            for submenu in children(of: item) {
+            for submenu in AX.children(of: item) {
                 if let found = findTunnelItem(named: tunnelName, in: submenu) { return found }
             }
         }
@@ -251,45 +237,11 @@ enum WireGuardAppAutomation {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         NSWorkspace.shared.openApplication(at: url, configuration: configuration, completionHandler: nil)
-        guard let pid = waitFor(timeout: 5, {
+        guard let pid = AX.waitFor(timeout: 5, {
             NSRunningApplication.runningApplications(withBundleIdentifier: WireGuardAppReader.bundleIdentifier).first?.processIdentifier
         }) else {
             throw Failure.appDidNotLaunch
         }
         return (pid, true)
-    }
-
-    // MARK: AX helpers
-
-    private static func attribute(_ element: AXUIElement?, _ name: String) -> AnyObject? {
-        guard let element else { return nil }
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
-        return value
-    }
-
-    /// Several attributes in one round trip; a missing one comes back as an
-    /// AXValue error, which the casts at the call site treat as nil.
-    private static func attributes(_ element: AXUIElement, _ names: [String]) -> [AnyObject] {
-        var values: CFArray?
-        guard AXUIElementCopyMultipleAttributeValues(element, names as CFArray, [], &values) == .success else {
-            return []
-        }
-        return values as [AnyObject]? ?? []
-    }
-
-    private static func children(of element: AnyObject?) -> [AXUIElement] {
-        guard let element, CFGetTypeID(element) == AXUIElementGetTypeID() else { return [] }
-        // swiftlint:disable:next force_cast
-        return attribute((element as! AXUIElement), kAXChildrenAttribute) as? [AXUIElement] ?? []
-    }
-
-    private static func waitFor<T>(timeout: TimeInterval, _ probe: () -> T?) -> T? {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if let value = probe() { return value }
-            Thread.sleep(forTimeInterval: 0.02)
-        } while Date() < deadline
-        return nil
     }
 }

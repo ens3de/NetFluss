@@ -703,12 +703,18 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
             }
             .store(in: &cancellables)
         pathMonitor.pathUpdateHandler = { [weak self] path in
+            // Only a physical link counts as online: a VPN's utun interface
+            // can keep the path "satisfied" after Wi-Fi/Ethernet are gone.
+            let physicalTypes: Set<NWInterface.InterfaceType> = [.wifi, .wiredEthernet, .cellular]
+            let physical: [NWInterface.InterfaceType] = path.availableInterfaces
+                .map { $0.type }
+                .filter { physicalTypes.contains($0) }
             let kind: PathKind
-            if path.status != .satisfied {
+            if path.status != .satisfied || physical.isEmpty {
                 kind = .offline
-            } else if path.isExpensive {
+            } else if path.isExpensive || physical.contains(.cellular) {
                 kind = .hotspot
-            } else if path.usesInterfaceType(.wifi) {
+            } else if physical.contains(.wifi) {
                 kind = .wifi
             } else {
                 kind = .wired
@@ -1462,7 +1468,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         let vpn = VPNManager.shared
         let font = NSFont.systemFont(ofSize: CGFloat(fontSize), weight: .medium)
         let busy = vpn.status.state != .connected
-        if vpn.status.state.isActive || vpn.status.state == .disconnecting,
+        // No physical link means no network, whatever a VPN still reports: a
+        // WireGuard tunnel stays "connected" for a while after Wi-Fi goes away.
+        if pathKind != .offline,
+           vpn.status.state.isActive || vpn.status.state == .disconnecting,
            let id = vpn.status.profileID,
            let profile = vpn.profiles.first(where: { $0.id == id }),
            let service = profile.nativeServiceName,
@@ -1480,7 +1489,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
 
         let symbolName: String
         let symbolColor: NSColor
-        if vpn.status.state.isActive || vpn.status.state == .disconnecting, vpn.status.profileID != nil {
+        if pathKind == .offline {
+            symbolName = "network.slash"
+            symbolColor = textColor
+        } else if vpn.status.state.isActive || vpn.status.state == .disconnecting, vpn.status.profileID != nil {
             symbolName = busy ? "shield.lefthalf.filled" : "lock.shield.fill"
             symbolColor = busy ? .systemOrange : .systemGreen
         } else if monitor.vpnActive {
@@ -1492,7 +1504,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
             case .wifi: symbolName = "wifi"
             case .hotspot: symbolName = "personalhotspot"
             case .wired: symbolName = "network"
-            case .offline: symbolName = "wifi.slash"
+            case .offline: symbolName = "network.slash"
             }
             symbolColor = textColor
         }
@@ -1501,8 +1513,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         let pointSize = max(NSFont.systemFontSize, CGFloat(fontSize))
         let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: [symbolColor]))
-        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName)?
-            .withSymbolConfiguration(configuration) else {
+        // "network.slash" needs macOS 14; older systems fall back to the
+        // crossed-out Wi-Fi symbol.
+        let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName)
+            ?? (symbolName == "network.slash" ? NSImage(systemSymbolName: "wifi.slash", accessibilityDescription: symbolName) : nil)
+        guard let image = symbol?.withSymbolConfiguration(configuration) else {
             return (nil, "none")
         }
         let mark = MenuBarAccessories.ConnectionMark(image: image, text: nil, font: font, textColor: textColor)

@@ -85,7 +85,9 @@ struct VPNSectionView: View {
                     if isActive(profile) { vpn.disconnect() } else { vpn.switchTo(profile) }
                 }
                 .controlSize(.small)
-                .disabled(vpn.status.state.isBusy)
+                // While On-Demand brings a system VPN back the user can still
+                // disconnect it (which turns On-Demand off).
+                .disabled(vpn.status.state.isBusy && !vpn.isNativeReasserting)
             }
 
             if profile.servers.count > 1 {

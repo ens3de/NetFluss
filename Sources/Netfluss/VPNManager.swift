@@ -57,6 +57,10 @@ final class VPNManager: ObservableObject {
     /// tunnel down, and the sync must not re-adopt it as connected meanwhile.
     private var stoppingNativeServices: [String: Date] = [:]
     private static let nativeStopGrace: TimeInterval = 15
+    /// True while `status` is `.reconnecting` because a system VPN with
+    /// On-Demand dropped and the system is bringing it back (network change,
+    /// wake) — not a reconnect NetFluss itself is driving.
+    @Published private(set) var isNativeReasserting = false
     private var loggedShadowrocketRouting: String?
 
     /// Set by AppState so the manager can refresh the public IP/flag on
@@ -311,6 +315,7 @@ final class VPNManager: ObservableObject {
     func connect(_ profile: VPNProfile, server: VPNServerEndpoint? = nil) {
         guard !status.state.isActive else { return }
         notice = nil
+        isNativeReasserting = false
         cancelPendingReconnect()
         reconnectAttempts = 0
         ikev2InitialRetries = 0
@@ -380,6 +385,7 @@ final class VPNManager: ObservableObject {
         // disconnect() no-ops from `.failed` and orphans the tunnel + temp config.
         guard status.state.isActive || activeTunnelHandle != nil || activeIKEv2 || ovpnClient != nil else { return }
         notice = nil
+        isNativeReasserting = false
         // A deliberate disconnect ends any auto-reconnect cycle.
         cancelPendingReconnect()
         stopWireGuardMonitor()
@@ -624,13 +630,49 @@ final class VPNManager: ObservableObject {
         stoppingNativeServices = stoppingNativeServices.filter { service, deadline in
             deadline > now && !(snapshots[service]?.state.isDown ?? true)
         }
+        let activeSnapshot = status.profileID
+            .flatMap { id in native.first(where: { $0.id == id })?.nativeServiceName }
+            .flatMap { snapshots[$0] }
+
+        // A system VPN with On-Demand that dropped is shown as reconnecting
+        // until the system brings it back, or its On-Demand is turned off.
+        if isNativeReasserting {
+            guard status.state == .reconnecting else {
+                isNativeReasserting = false
+                return
+            }
+            guard let snapshot = activeSnapshot else {
+                // The service is gone from the network settings.
+                status = .idle
+                isNativeReasserting = false
+                return
+            }
+            if snapshot.state == .connected {
+                VPNDiagnosticsLog.shared.log("System VPN \"\(snapshot.name)\" is back up (On-Demand)")
+                status.state = .connected
+                isNativeReasserting = false
+                refreshPublicIP()
+            } else if snapshot.state.isDown, !snapshot.isOnDemandEnabled {
+                VPNDiagnosticsLog.shared.log("System VPN \"\(snapshot.name)\" stayed down; On-Demand is off")
+                status = .idle
+                isNativeReasserting = false
+                refreshPublicIP()
+            }
+            return
+        }
         guard !status.state.isBusy else { return }
 
         if status.state.isActive {
-            guard let id = status.profileID,
-                  let service = native.first(where: { $0.id == id })?.nativeServiceName,
-                  let snapshot = snapshots[service], snapshot.state.isDown else { return }
-            VPNDiagnosticsLog.shared.log("System VPN \"\(service)\" went \(snapshot.state.rawValue) outside NetFluss")
+            guard let snapshot = activeSnapshot, snapshot.state.isDown else { return }
+            if snapshot.isOnDemandEnabled {
+                // On-Demand drops and re-establishes the tunnel on network
+                // changes and wake; it is still "on", so keep showing it.
+                VPNDiagnosticsLog.shared.log("System VPN \"\(snapshot.name)\" went \(snapshot.state.rawValue); waiting for On-Demand to reconnect")
+                status.state = .reconnecting
+                isNativeReasserting = true
+                return
+            }
+            VPNDiagnosticsLog.shared.log("System VPN \"\(snapshot.name)\" went \(snapshot.state.rawValue) outside NetFluss")
             status = .idle
             refreshPublicIP()
         } else if let profile = native.first(where: { profile in
@@ -1065,7 +1107,7 @@ final class VPNManager: ObservableObject {
             NativeVPN.stop(service)
             return nil
         }
-        guard WireGuardAppAutomation.isTrusted(prompt: true) else {
+        guard AX.isTrusted(prompt: true) else {
             return WireGuardAppAutomation.Failure.notTrusted.message
         }
         do {
@@ -1098,7 +1140,7 @@ final class VPNManager: ObservableObject {
     private func startWireGuardAppOnDemand(_ service: String) async -> Bool {
         let tunnel = await Task.detached { WireGuardAppReader.tunnel(serviceName: service) }.value
         guard let tunnel, tunnel.hasOnDemandRules, !tunnel.isOnDemandEnabled,
-              WireGuardAppAutomation.isTrusted(prompt: false) else { return false }
+              AX.isTrusted(prompt: false) else { return false }
         do {
             let timings = try await Task.detached(priority: .userInitiated) {
                 try WireGuardAppAutomation.clickTunnel(named: service)
